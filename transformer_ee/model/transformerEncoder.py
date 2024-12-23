@@ -63,7 +63,9 @@ class Transformer_EE_MV(nn.Module):
         y = self.linear_scalar2(y)
         y = F.relu(y)
 
-        output = torch.cat((output, y), dim=1)
+        #print('output: ', output.size())
+        #print('y: ', torch.squeeze(y).size())
+        output = torch.cat((output, y), 1)#------------------removed torch.squeeze() on y
 
         output = self.linear1(output)
         output = F.relu(output)

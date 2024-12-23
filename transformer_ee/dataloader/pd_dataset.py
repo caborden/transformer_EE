@@ -3,20 +3,21 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+import uproot
+import awkward as ak
+import awkward_pandas #required for converting trees with vector data to pandas df's
 
 from transformer_ee.utils.weights import create_weighter
 
 from .sequence import sequence_statistics, string_to_float_list
 
 
-class pandas_Dataset(Dataset):  # pylint: disable=C0103, W0223
+class pandas_Dataset(Dataset):
     """
     A base PyTorch dataset for pandas dataframe
     """
 
-    def __init__(
-        self, config: dict, dtframe: pd.DataFrame, weighter=None, eval=False
-    ):  # pylint: disable=W0622
+    def __init__(self, config: dict, dtframe: pd.DataFrame, weighter=None, eval=False):
         self.eval = eval
         self.config = config.copy()
 
@@ -39,8 +40,8 @@ class pandas_Dataset(Dataset):  # pylint: disable=C0103, W0223
             print("Using provided weighter. Type: ", type(self.weighter))
 
         # convert string to list of float
-        for sequence_name in self.config["vector"]:
-            self.df[sequence_name] = self.df[sequence_name].apply(string_to_float_list)
+        # for sequence_name in self.config["vector"]:
+        #     self.df[sequence_name] = self.df[sequence_name].apply(string_to_float_list)
 
     def __len__(self):
         return len(self.df)
@@ -51,17 +52,31 @@ class Normalized_pandas_Dataset_with_cache(pandas_Dataset):
     A base PyTorch dataset for pandas dataframe with normalization and caching
     """
 
-    def __init__(
-        self,
-        config: dict,
-        dtframe: pd.DataFrame,
-        weighter=None,
-        eval=False,  # pylint: disable=W0622
-        use_cache=True,
-    ):
+    def __init__(self, config: dict, dtframe: pd.DataFrame, weighter=None, eval=False, use_cache=True):
         super().__init__(config, dtframe, weighter=weighter, eval=eval)
         self.use_cache = use_cache
         self.cached = {}
+
+        # pad variable length vector arrays with zeros to the same maximum size
+        maxarraylens = []
+        for column in self.vectornames:
+            self.df.loc[:,'{0}_array_length'.format(column)] = self.df.loc[:,column].apply(lambda x: len(x)) 
+            maxarraylens = np.append(maxarraylens, self.df['{0}_array_length'.format(column)].max())
+        maxarraylen = maxarraylens.max() #max array length across all vectornames
+
+        def _pad_array(event_array, maxarraylen): 
+            padded_event_array = ak.fill_none(ak.pad_none(event_array, int(maxarraylen), clip=False, axis=0), 0)
+            np_padded_event_array = padded_event_array.to_numpy().astype(float)
+            return np_padded_event_array
+
+        for column in self.vectornames:
+            self.df[column] = self.df.loc[:,column].apply(lambda x: _pad_array(x, maxarraylen))
+
+        padded_vectornames = list()
+        for column in self.vectornames:
+            padded_vectornames.append("padded_{0}".format(self.vectornames[0]))
+        self.padded_vectornames = padded_vectornames
+
         self.normalized_df = self.df.copy()
 
         # convert list of float to numpy array
@@ -110,8 +125,7 @@ class Normalized_pandas_Dataset_with_cache(pandas_Dataset):
 
         for sequence_name in self.vectornames + self.scalarnames:
             self.normalized_df[sequence_name] = self.normalized_df[sequence_name].apply(
-                lambda x, seq_name: (x - _stat[seq_name][0]) / _stat[seq_name][1],
-                args=(sequence_name,),
+                lambda x: (x - _stat[sequence_name][0]) / _stat[sequence_name][1]
             )
 
         self.normalized = True
@@ -126,10 +140,14 @@ class Normalized_pandas_Dataset_with_cache(pandas_Dataset):
             raise ValueError("Please call normalize() first!")
 
         _vectorsize = len(row[self.vectornames[0]])
-        _vector = torch.Tensor(np.stack(row[self.vectornames].values))
-        _scalar = torch.Tensor(np.stack(row[self.scalarnames].values))
+        _vector = torch.Tensor(np.stack(row[self.vectornames].to_numpy()))
+        _scalar = torch.Tensor(np.stack(row[self.scalarnames].to_numpy().astype(float)))
+        
+        # _vector = torch.Tensor(np.stack(row[self.vectornames].values))
+        # _scalar = torch.Tensor(np.stack(row[self.scalarnames].values))
 
         _vector = _vector.T
+        #print('pre; vector_size:',_vector.size())
 
         _mask = torch.Tensor([0] * _vectorsize)
 
@@ -138,9 +156,11 @@ class Normalized_pandas_Dataset_with_cache(pandas_Dataset):
                 _vector, (0, 0, 0, self.maxpronglen - _vectorsize), "constant", 0
             )
             _mask = F.pad(_mask, (0, self.maxpronglen - _vectorsize), "constant", 1)
+            #print('pad; vector_size:',_vector.size())
         else:
             _vector = _vector[: self.maxpronglen, :]
             _mask = _mask[: self.maxpronglen]
+            #print('cut; vector_size:',_vector.size())
 
         if not _vectorsize:
             _vector = torch.zeros((self.maxpronglen, len(self.vectornames)))
@@ -149,6 +169,7 @@ class Normalized_pandas_Dataset_with_cache(pandas_Dataset):
         _target = 0.0
         _weight = 1.0
         if not self.eval:
+            
             _target = torch.Tensor(np.stack(row[self.targetname].values))
             _weight = torch.Tensor([self.weighter.getweight(row[self.targetname[0]])])
 
@@ -159,6 +180,7 @@ class Normalized_pandas_Dataset_with_cache(pandas_Dataset):
             _target,  # shape: (target_dim)
             _weight,  # shape: (1)
         )
+        #print('return_tuple:', return_tuple)
         if self.use_cache:
             self.cached[index] = return_tuple
         return return_tuple
