@@ -334,6 +334,11 @@ void newflat()
             Energy[i] = energy;
             Inverse_XSec_Flux[i] = inverse_xsec_flux;
         }
+    TGraph* inverse_xsec_flux_check = new TGraph(inverse_count,Energy,Inverse_XSec_Flux);
+    inverse_xsec_flux_check->SetName("inverse_xsec_flux_check");
+    inverse_xsec_flux_check->SetTitle("inverse_xsec_flux_check");
+    inverse_xsec_flux_check->SetLineColor(kBlack);
+    inverse_xsec_flux_check->Write();
     double XSEC_NC, XSEC_CC, FLAT_SPECTRA[inverse_count];
     for (int i = 0; i < inverse_count; i++)
         {
